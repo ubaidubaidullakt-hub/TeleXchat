@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>GhostNet Navigation-Safe</title>
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<style>
+    :root { --primary: #2563eb; --dark: #020617; --panel: #1e293b; --success: #10b981; --danger: #ef4444; }
+    body { margin:0; background:var(--dark); color:#f8fafc; font-family: sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+    
+    .header { background: #000; padding: 12px 15px; display: flex; justify-content: space-between; border-bottom: 1px solid #1e293b; font-size: 13px; }
+
+    #messages { 
+        flex: 1; overflow-y: auto; padding: 15px; display: flex; 
+        flex-direction: column; gap: 10px; background: #0b1222;
+        /* Padding at bottom so last message isn't hidden by the bar */
+        padding-bottom: 120px; 
+    }
+
+    .msg { max-width: 80%; padding: 10px; border-radius: 15px; font-size: 15px; }
+    .mine { background: var(--primary); align-self: flex-end; }
+    .theirs { background: var(--panel); align-self: flex-start; }
+
+    /* REDMI 9I NAVIGATION SAFE ZONE */
+    .bottom-suite { 
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: rgba(30, 41, 59, 0.95); 
+        backdrop-filter: blur(10px);
+        /* 35px padding-bottom creates space for Home/Back buttons */
+        padding: 10px 10px 35px 10px; 
+        border-top: 1px solid #334155;
+        z-index: 1000;
+    }
+
+    .nav-strip { 
+        display: flex; justify-content: space-around; 
+        align-items: center; padding-bottom: 10px; 
+    }
+    
+    .input-strip { display: flex; align-items: center; gap: 8px; }
+    .input-box { 
+        flex: 1; background: var(--dark); border-radius: 20px; 
+        padding: 0 12px; display: flex; align-items: center; 
+        border: 1px solid #475569; height: 40px; 
+    }
+    .input-box input { flex: 1; background: transparent; border: none; color: white; font-size: 15px; outline: none; }
+
+    .icon-btn { 
+        background: none; border: none; color: white; 
+        display: flex; flex-direction: column; align-items: center; 
+        font-size: 10px; gap: 2px;
+    }
+    .icon-btn b { font-size: 18px; }
+
+    .action-circle { 
+        width: 42px; height: 42px; border-radius: 50%; border: none; 
+        display: flex; align-items: center; justify-content: center; color: white; 
+    }
+    #ptt { background: #475569; }
+    #ptt.rec { background: var(--danger); }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <span id="curChanName">Public</span>
+    <span id="mySim" style="color:var(--success)">+ID...</span>
+</div>
+
+<div id="messages"></div>
+
+<div class="bottom-suite">
+    <div class="nav-strip">
+        <button class="icon-btn" onclick="searchChannel()"><b>🔍</b>Search</button>
+        <button class="icon-btn" onclick="openCreate()"><b>➕</b>Create</button>
+        <select id="chanSelect" onchange="switchChannel(this.value)" style="background:var(--dark); color:white; border-radius:5px; height:30px; border:1px solid #3b82f6;"></select>
+        <button class="icon-btn" id="shieldBtn" style="display:none;" onclick="openAdmin()"><b>🛡️</b>Admin</button>
+        <button class="icon-btn" onclick="openMail()"><b>📬</b>Mail</button>
+    </div>
+
+    <div class="input-strip">
+        <button onclick="document.getElementById('fileInp').click()" style="background:none; border:none; font-size:22px;">📎</button>
+        <div class="input-box">
+            <input id="msgInp" placeholder="Type here..." onkeypress="if(event.key==='Enter') send()">
+        </div>
+        <button id="ptt" class="action-circle" onmousedown="startRec()" onmouseup="stopRec()" ontouchstart="startRec()" ontouchend="stopRec()">🎙️</button>
+        <button class="action-circle" style="background:var(--primary)" onclick="send()">➤</button>
+    </div>
+</div>
+
+<input type="file" id="fileInp" style="display:none" onchange="handleFile(this.files)">
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script>
+// Logic remains active and connected to Firebase
+const firebaseConfig = { apiKey: "AIzaSyBfm9sdgiWVParO8zI2gP7xATUCODCLkzw", databaseURL: "https://secret-chat-2f397-default-rtdb.firebaseio.com", projectId: "secret-chat-2f397" };
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+const mySim = localStorage.sim || Math.floor(1000000000 + Math.random() * 9000000000).toString();
+localStorage.sim = mySim;
+document.getElementById('mySim').innerText = `+${mySim}`;
+
+let curChan = "Public";
+let recorder, chunks = [];
+
+function switchChannel(name) {
+    curChan = name;
+    document.getElementById('curChanName').innerText = name;
+    db.ref("channels/" + name).once("value", s => {
+        const data = s.val() || {};
+        document.getElementById('shieldBtn').style.display = (data.creator === mySim || data.type === 'group') ? 'flex' : 'none';
+        loadMsgs();
+    });
+}
+
+function loadMsgs() {
+    const box = document.getElementById('messages');
+    box.innerHTML = "";
+    db.ref("rooms/" + curChan).off();
+    db.ref("rooms/" + curChan).on("child_added", snap => {
+        const d = snap.val();
+        const div = document.createElement('div');
+        div.className = `msg ${d.sim === mySim ? 'mine' : 'theirs'}`;
+        if(d.cat === 'audio') div.innerHTML = `<audio src="${d.media}" controls style="width:180px;"></audio>`;
+        else if(d.cat === 'image') div.innerHTML = `<img src="${d.media}" style="width:100%; border-radius:10px;">`;
+        else div.innerHTML = `<span>${d.txt || "Media"}</span>`;
+        box.appendChild(div);
+        box.scrollTop = box.scrollHeight;
+    });
+}
+
+function send() {
+    const i = document.getElementById('msgInp');
+    if(!i.value) return;
+    db.ref("rooms/" + curChan).push({ sim: mySim, txt: i.value });
+    i.value = "";
+}
+
+async function startRec() {
+    const s = await navigator.mediaDevices.getUserMedia({audio:true});
+    recorder = new MediaRecorder(s); chunks = [];
+    document.getElementById('ptt').classList.add('rec');
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = () => {
+        const reader = new FileReader();
+        reader.readAsDataURL(new Blob(chunks));
+        reader.onloadend = () => db.ref("rooms/" + curChan).push({ sim: mySim, media: reader.result, cat: 'audio' });
+    };
+    recorder.start();
+}
+function stopRec() { if(recorder) { recorder.stop(); document.getElementById('ptt').classList.remove('rec'); } }
+
+function handleFile(fs) {
+    const reader = new FileReader();
+    reader.onload = e => db.ref("rooms/" + curChan).push({ sim: mySim, media: e.target.result, cat: fs[0].type.split('/')[0], txt: fs[0].name });
+    reader.readAsDataURL(fs[0]);
+}
+
+function searchChannel() { const n = prompt("Channel Name:"); if(n) switchChannel(n); }
+function openCreate() { 
+    const n = prompt("New Channel Name:"); 
+    const t = confirm("Group Mode? (Cancel for Admin Mode)") ? "group" : "adminOnly";
+    if(n) db.ref("channels/"+n).set({ creator: mySim, type: t }); 
+}
+
+db.ref("channels").on("value", s => {
+    const sel = document.getElementById('chanSelect');
+    sel.innerHTML = "";
+    Object.keys(s.val()||{}).forEach(c => { const o = document.createElement('option'); o.value=o.text=c; sel.appendChild(o); });
+});
+
+switchChannel("Public");
+</script>
+</body>
+</html>
